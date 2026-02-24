@@ -1,0 +1,4 @@
+Le prompt pour faire un test :
+You can use this prompt for generating a brillant article: user_prompt = ''' Write a 800 word in-depth LONG detailed {TYPE}. Use H1, H2 u li headlines. The title is {TITLE}. Share your experience and explain {GOAL} in a step-by-step format. Use keywords : {KEYWORDS}. Use the {CONTEXT} to get your information. ''' Give me the parameter for generating some brillant articles on: Define TYPE, TITLE, GOAL, KEYWORDS, CONTEXT for this text:
+
+*PC case:** A PC case is the enclosure that houses the components of a personal computer. It is typically made of metal or plastic and has a variety of features, such as cooling fans, ports, and expansion slots.
