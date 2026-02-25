@@ -1,0 +1,187 @@
+{
+  "name": "WF4 - Gestion Calendrier de Contenu (Daily)",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 8 * * *"
+            }
+          ]
+        }
+      },
+      "id": "cron-daily",
+      "name": "Cron - 08h00 Quotidien",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [240, 300]
+    },
+    {
+      "parameters": {
+        "operation": "read",
+        "documentId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "={{ $credentials.contentCalendarSheetId }}"
+        },
+        "sheetName": {
+          "__rl": true,
+          "mode": "name",
+          "value": "Calendrier"
+        },
+        "options": {}
+      },
+      "id": "sheets-read-calendar",
+      "name": "Lire Calendrier Complet",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [460, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Analyser le calendrier de contenu pour le résumé quotidien\nconst items = $input.all();\nconst today = new Date();\ntoday.setHours(0, 0, 0, 0);\n\nconst stats = {\n  total: items.length,\n  published: 0,\n  inProgress: 0,\n  planned: 0,\n  overdue: [],\n  dueThisWeek: [],\n  byType: { BOFU: 0, TOFU: 0, 'Linkable Asset': 0 }\n};\n\nconst oneWeekFromNow = new Date(today);\noneWeekFromNow.setDate(oneWeekFromNow.getDate() + 7);\n\nfor (const item of items) {\n  const row = item.json;\n  const status = (row.Statut || '').toLowerCase();\n  const pubDate = row['Date de Publication'] ? new Date(row['Date de Publication']) : null;\n  const type = row.Type || 'BOFU';\n  \n  // Comptage par statut\n  if (status.includes('publi')) stats.published++;\n  else if (status.includes('production') || status.includes('édition') || status.includes('brouillon')) stats.inProgress++;\n  else stats.planned++;\n  \n  // Comptage par type\n  if (stats.byType[type] !== undefined) stats.byType[type]++;\n  \n  // Articles en retard\n  if (pubDate && pubDate < today && !status.includes('publi')) {\n    stats.overdue.push({\n      title: row['URL du Sujet'] || row.Title || 'Sans titre',\n      dueDate: row['Date de Publication'],\n      owner: row.Propriétaire || row.Owner || 'Non assigné',\n      status: row.Statut\n    });\n  }\n  \n  // Articles à produire cette semaine\n  if (pubDate && pubDate >= today && pubDate <= oneWeekFromNow && !status.includes('publi')) {\n    stats.dueThisWeek.push({\n      title: row['URL du Sujet'] || row.Title || 'Sans titre',\n      dueDate: row['Date de Publication'],\n      owner: row.Propriétaire || row.Owner || 'Non assigné',\n      status: row.Statut\n    });\n  }\n}\n\n// Calcul vélocité (% complété)\nconst velocity = stats.total > 0 ? Math.round((stats.published / stats.total) * 100) : 0;\n\n// Générer le rapport\nlet report = `# Rapport Quotidien - Calendrier de Contenu\\n`;\nreport += `**Date:** ${today.toISOString().split('T')[0]}\\n\\n`;\nreport += `## Statistiques du Sprint\\n\\n`;\nreport += `| Métrique | Valeur |\\n|----------|--------|\\n`;\nreport += `| Articles totaux | ${stats.total} |\\n`;\nreport += `| Publiés | ${stats.published} (${velocity}%) |\\n`;\nreport += `| En cours | ${stats.inProgress} |\\n`;\nreport += `| Planifiés | ${stats.planned} |\\n`;\nreport += `| BOFU | ${stats.byType.BOFU} |\\n`;\nreport += `| TOFU | ${stats.byType.TOFU} |\\n`;\nreport += `| Linkable Assets | ${stats.byType['Linkable Asset']} |\\n\\n`;\n\nif (stats.overdue.length > 0) {\n  report += `## ⚠ Articles en Retard (${stats.overdue.length})\\n\\n`;\n  for (const a of stats.overdue) {\n    report += `- **${a.title}** - Prévu le ${a.dueDate} - ${a.owner} (${a.status})\\n`;\n  }\n  report += '\\n';\n}\n\nif (stats.dueThisWeek.length > 0) {\n  report += `## Cette Semaine (${stats.dueThisWeek.length})\\n\\n`;\n  for (const a of stats.dueThisWeek) {\n    report += `- **${a.title}** - Prévu le ${a.dueDate} - ${a.owner} (${a.status})\\n`;\n  }\n}\n\nreturn [{\n  json: {\n    report,\n    htmlReport: report.replace(/\\n/g, '<br>'),\n    hasOverdue: stats.overdue.length > 0,\n    overdueCount: stats.overdue.length,\n    overdueItems: stats.overdue,\n    velocity,\n    stats\n  }\n}];"
+      },
+      "id": "analyze-calendar",
+      "name": "Analyser Calendrier",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [680, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.hasOverdue }}",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "id": "check-overdue",
+      "name": "Articles en Retard ?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [900, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Préparer les alertes individuelles pour chaque article en retard\nconst data = $input.first().json;\nconst alerts = [];\n\nfor (const item of data.overdueItems) {\n  alerts.push({\n    json: {\n      to: item.owner,\n      subject: `[URGENT] Article en retard: ${item.title}`,\n      message: `Bonjour ${item.owner},\\n\\nL'article \"${item.title}\" prévu pour le ${item.dueDate} est en retard.\\nStatut actuel: ${item.status}\\n\\nMerci de mettre à jour le statut dans le calendrier de contenu.`\n    }\n  });\n}\n\nreturn alerts;"
+      },
+      "id": "prepare-overdue-alerts",
+      "name": "Préparer Alertes Retard",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1120, 200]
+    },
+    {
+      "parameters": {
+        "sendTo": "={{ $json.to }}",
+        "subject": "={{ $json.subject }}",
+        "message": "={{ $json.message }}",
+        "options": {}
+      },
+      "id": "gmail-overdue",
+      "name": "Gmail - Alerte Retard",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [1340, 200]
+    },
+    {
+      "parameters": {
+        "sendTo": "={{ $credentials.notificationEmail }}",
+        "subject": "={{ '[Calendrier] Résumé quotidien - ' + new Date().toISOString().split('T')[0] }}",
+        "message": "={{ $('Analyser Calendrier').first().json.htmlReport }}",
+        "options": {}
+      },
+      "id": "gmail-daily-summary",
+      "name": "Gmail - Résumé Quotidien",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [1120, 400]
+    }
+  ],
+  "connections": {
+    "Cron - 08h00 Quotidien": {
+      "main": [
+        [
+          {
+            "node": "Lire Calendrier Complet",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Lire Calendrier Complet": {
+      "main": [
+        [
+          {
+            "node": "Analyser Calendrier",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Analyser Calendrier": {
+      "main": [
+        [
+          {
+            "node": "Articles en Retard ?",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Gmail - Résumé Quotidien",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Articles en Retard ?": {
+      "main": [
+        [
+          {
+            "node": "Préparer Alertes Retard",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "Préparer Alertes Retard": {
+      "main": [
+        [
+          {
+            "node": "Gmail - Alerte Retard",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner"
+  },
+  "tags": [
+    {
+      "name": "SEO",
+      "id": "1"
+    },
+    {
+      "name": "Calendar Management",
+      "id": "5"
+    }
+  ],
+  "meta": {
+    "instanceId": "keyword-automatisation"
+  }
+}
