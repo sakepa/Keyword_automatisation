@@ -1,0 +1,422 @@
+{
+  "name": "WF1 - Recherche Mots-Clés & Extraction Entités",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "trigger-manual",
+      "name": "Déclenchement Manuel",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [240, 300]
+    },
+    {
+      "parameters": {
+        "values": {
+          "string": [
+            {
+              "name": "topic",
+              "value": "={{ $json.topic || 'hotel à Cannes' }}"
+            },
+            {
+              "name": "language",
+              "value": "={{ $json.language || 'fr' }}"
+            }
+          ],
+          "number": [
+            {
+              "name": "n_queries",
+              "value": "={{ $json.n_queries || 10 }}"
+            },
+            {
+              "name": "n_responses",
+              "value": "={{ $json.n_responses || 5 }}"
+            },
+            {
+              "name": "search_limit",
+              "value": "={{ $json.search_limit || 5 }}"
+            }
+          ]
+        }
+      },
+      "id": "set-params",
+      "name": "Paramètres de Recherche",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [460, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://{{$credentials.vertexAiRegion}}-aiplatform.googleapis.com/v1/projects/{{$credentials.vertexAiProject}}/locations/{{$credentials.vertexAiRegion}}/publishers/google/models/gemini-1.5-pro:generateContent",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "googleApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ contents: [{ role: 'user', parts: [{ text: `I need ${$json.n_queries} distinct intent searches related to ${$json.topic}. They should reflect common and detailed inquiries that people might have about the topic. Do not print anything other than the questions and/or searches themselves. No intro or outro text or numbered list should be included. Respect the ISO code ${$json.language}` }] }], systemInstruction: { parts: [{ text: 'You are all-knowing genius at understanding how people search. Your task is to generate intent searches related to a topic.' }] }, generationConfig: { maxOutputTokens: 600, temperature: 0.6, topP: 1.0, topK: 40 } }) }}",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "gemini-generate-queries",
+      "name": "Gemini - Générer Requêtes",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [680, 300],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
+    },
+    {
+      "parameters": {
+        "jsCode": "// Parser les requêtes générées par Gemini\nconst response = $input.first().json;\nlet text = '';\n\ntry {\n  text = response.candidates[0].content.parts[0].text;\n} catch (e) {\n  throw new Error('Impossible de parser la réponse Gemini: ' + JSON.stringify(response));\n}\n\n// Séparer les requêtes (par saut de ligne)\nconst queries = text\n  .split('\\n')\n  .map(q => q.replace(/^\\d+\\.\\s*/, '').trim())\n  .filter(q => q.length > 3);\n\nconst topic = $('Paramètres de Recherche').first().json.topic;\nconst language = $('Paramètres de Recherche').first().json.language;\nconst n_responses = $('Paramètres de Recherche').first().json.n_responses;\nconst search_limit = $('Paramètres de Recherche').first().json.search_limit;\n\nreturn queries.map(query => ({\n  json: {\n    query,\n    topic,\n    language,\n    n_responses,\n    search_limit\n  }\n}));"
+      },
+      "id": "parse-queries",
+      "name": "Parser les Requêtes",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [900, 300]
+    },
+    {
+      "parameters": {
+        "batchSize": 3,
+        "options": {}
+      },
+      "id": "split-batches",
+      "name": "Traitement par Lots",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [1120, 300]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "https://www.googleapis.com/customsearch/v1",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "googleApi",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "q",
+              "value": "={{ $json.query }}"
+            },
+            {
+              "name": "cx",
+              "value": "={{ $credentials.googleSearchEngineId }}"
+            },
+            {
+              "name": "key",
+              "value": "={{ $credentials.googleSearchApiKey }}"
+            },
+            {
+              "name": "num",
+              "value": "={{ $json.search_limit }}"
+            },
+            {
+              "name": "gl",
+              "value": "={{ $json.language }}"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 15000
+        }
+      },
+      "id": "google-search",
+      "name": "Google Search API",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1340, 200],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "jsCode": "// Extraire les snippets des résultats Google Search\nconst searchResults = $input.first().json;\nconst query = $('Traitement par Lots').first().json.query;\n\nlet snippetsAll = '';\nlet results = [];\n\nif (searchResults.items && searchResults.items.length > 0) {\n  for (const item of searchResults.items) {\n    snippetsAll += (item.snippet || '') + ' ';\n    results.push({\n      title: item.title || '',\n      link: item.link || '',\n      snippet: item.snippet || ''\n    });\n  }\n}\n\nreturn [{\n  json: {\n    query,\n    snippets: snippetsAll.trim(),\n    searchResults: results,\n    topic: $('Traitement par Lots').first().json.topic,\n    language: $('Traitement par Lots').first().json.language,\n    n_responses: $('Traitement par Lots').first().json.n_responses\n  }\n}];"
+      },
+      "id": "extract-snippets",
+      "name": "Extraire Snippets",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1560, 200]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://{{$credentials.vertexAiRegion}}-aiplatform.googleapis.com/v1/projects/{{$credentials.vertexAiProject}}/locations/{{$credentials.vertexAiRegion}}/publishers/google/models/gemini-1.5-pro:generateContent",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "googleApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ contents: [{ role: 'user', parts: [{ text: `I need detailed information on this topic: \"${$json.query}\". If relevant, please mention specific brand names or products. Best content: \"${$json.snippets}\"` }] }], systemInstruction: { parts: [{ text: $json.language === 'fr' ? 'Je m\\'appelle Bard. Je suis un modèle linguistique de Google AI. Je peux générer du texte et répondre de manière informative. Tu parles seulement en français.' : 'My name is Bard. I am a large language model from Google AI. I can generate text and answer your questions in an informative way.' }] }, generationConfig: { maxOutputTokens: 600, temperature: 0.6, topP: 1.0, topK: 40 } }) }}",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "gemini-generate-responses",
+      "name": "Gemini - Générer Réponses",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1780, 200],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.openai.com/v1/chat/completions",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "openAiApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ model: 'gpt-3.5-turbo', messages: [{ role: 'system', content: 'You are a helpful assistant. Your task is to extract specific SEO elements such as named entities and domain-specific expressions from a text.' }, { role: 'user', content: `Can you extract any specific SEO elements from the following text: \"${$json.candidates?.[0]?.content?.parts?.[0]?.text || ''}\"? Please respond only with a JSON array of items, removing stop words and limiting to 3 words per item: [\"E1\", \"E2\", \"E3\"]` }], temperature: 0.3, max_tokens: 500 }) }}",
+        "options": {
+          "timeout": 20000
+        }
+      },
+      "id": "openai-extract-entities",
+      "name": "OpenAI - Extraire Entités",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2000, 200],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000
+    },
+    {
+      "parameters": {
+        "jsCode": "// Parser les entités extraites par OpenAI et les accumuler\nconst items = $input.all();\nconst allEntities = [];\n\nfor (const item of items) {\n  try {\n    const content = item.json.choices?.[0]?.message?.content || '[]';\n    // Extraire le tableau JSON de la réponse\n    const match = content.match(/\\[.*\\]/s);\n    if (match) {\n      const entities = JSON.parse(match[0]);\n      const query = $('Traitement par Lots').first().json.query;\n      for (const entity of entities) {\n        if (entity && entity.trim().length > 0) {\n          allEntities.push({\n            query,\n            entity: entity.trim(),\n            mentions: 1\n          });\n        }\n      }\n    }\n  } catch (e) {\n    // Skip mal-formed responses\n    continue;\n  }\n}\n\nreturn allEntities.map(e => ({ json: e }));"
+      },
+      "id": "parse-entities",
+      "name": "Parser Entités",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2220, 200]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Fuzzy matching et comptage de fréquences (équivalent unify_similar_entity)\nconst items = $input.all();\n\n// Collecter toutes les entités\nconst entityMap = new Map();\n\nfor (const item of items) {\n  const entity = item.json.entity?.toLowerCase().trim();\n  if (!entity || entity === 'n/a') continue;\n  \n  // Chercher une entité similaire existante (fuzzy matching simple)\n  let matched = false;\n  for (const [key, data] of entityMap) {\n    if (fuzzyMatch(entity, key) >= 90) {\n      data.mentions += 1;\n      data.queries.add(item.json.query);\n      matched = true;\n      break;\n    }\n  }\n  \n  if (!matched) {\n    entityMap.set(entity, {\n      entity: item.json.entity.trim(),\n      mentions: 1,\n      queries: new Set([item.json.query])\n    });\n  }\n}\n\n// Fonction de fuzzy matching (token sort ratio simplifié)\nfunction fuzzyMatch(a, b) {\n  if (a === b) return 100;\n  \n  const tokensA = a.split(/\\s+/).sort().join(' ');\n  const tokensB = b.split(/\\s+/).sort().join(' ');\n  \n  if (tokensA === tokensB) return 100;\n  \n  // Levenshtein-based similarity\n  const maxLen = Math.max(tokensA.length, tokensB.length);\n  if (maxLen === 0) return 100;\n  \n  const distance = levenshtein(tokensA, tokensB);\n  return Math.round((1 - distance / maxLen) * 100);\n}\n\nfunction levenshtein(a, b) {\n  const matrix = [];\n  for (let i = 0; i <= b.length; i++) matrix[i] = [i];\n  for (let j = 0; j <= a.length; j++) matrix[0][j] = j;\n  \n  for (let i = 1; i <= b.length; i++) {\n    for (let j = 1; j <= a.length; j++) {\n      if (b.charAt(i - 1) === a.charAt(j - 1)) {\n        matrix[i][j] = matrix[i - 1][j - 1];\n      } else {\n        matrix[i][j] = Math.min(\n          matrix[i - 1][j - 1] + 1,\n          matrix[i][j - 1] + 1,\n          matrix[i - 1][j] + 1\n        );\n      }\n    }\n  }\n  return matrix[b.length][a.length];\n}\n\n// Convertir en résultats triés par fréquence\nconst results = [];\nfor (const [key, data] of entityMap) {\n  results.push({\n    json: {\n      entity: data.entity,\n      totalMentions: data.mentions,\n      queryCount: data.queries.size,\n      queries: Array.from(data.queries).join(', '),\n      prominence: (data.mentions / items.length).toFixed(4)\n    }\n  });\n}\n\n// Trier par mentions décroissantes\nresults.sort((a, b) => b.json.totalMentions - a.json.totalMentions);\n\nreturn results;"
+      },
+      "id": "fuzzy-match-frequency",
+      "name": "Fuzzy Match & Fréquences",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2440, 300]
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "={{ $credentials.contentCalendarSheetId }}"
+        },
+        "sheetName": {
+          "__rl": true,
+          "mode": "name",
+          "value": "Entités"
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData"
+        },
+        "options": {}
+      },
+      "id": "sheets-write-entities",
+      "name": "Écrire dans Google Sheets",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [2660, 200]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Générer un résumé des top 20 entités pour l'email\nconst items = $input.all();\nconst topic = $('Paramètres de Recherche').first().json.topic;\nconst top20 = items.slice(0, 20);\n\nlet summary = `## Recherche de mots-clés terminée\\n\\n`;\nsummary += `**Topic:** ${topic}\\n`;\nsummary += `**Entités uniques trouvées:** ${items.length}\\n\\n`;\nsummary += `### Top 20 Entités\\n\\n`;\nsummary += `| # | Entité | Mentions | Proéminence |\\n`;\nsummary += `|---|--------|----------|------------|\\n`;\n\ntop20.forEach((item, i) => {\n  summary += `| ${i + 1} | ${item.json.entity} | ${item.json.totalMentions} | ${item.json.prominence} |\\n`;\n});\n\nreturn [{\n  json: {\n    subject: `[Keyword Research] Résultats pour: ${topic}`,\n    htmlBody: summary.replace(/\\n/g, '<br>'),\n    totalEntities: items.length,\n    topic\n  }\n}];"
+      },
+      "id": "prepare-email",
+      "name": "Préparer Résumé Email",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2660, 400]
+    },
+    {
+      "parameters": {
+        "sendTo": "={{ $credentials.notificationEmail }}",
+        "subject": "={{ $json.subject }}",
+        "message": "={{ $json.htmlBody }}",
+        "options": {}
+      },
+      "id": "gmail-notify",
+      "name": "Gmail - Notification",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [2880, 400]
+    }
+  ],
+  "connections": {
+    "Déclenchement Manuel": {
+      "main": [
+        [
+          {
+            "node": "Paramètres de Recherche",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Paramètres de Recherche": {
+      "main": [
+        [
+          {
+            "node": "Gemini - Générer Requêtes",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gemini - Générer Requêtes": {
+      "main": [
+        [
+          {
+            "node": "Parser les Requêtes",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parser les Requêtes": {
+      "main": [
+        [
+          {
+            "node": "Traitement par Lots",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Traitement par Lots": {
+      "main": [
+        [
+          {
+            "node": "Google Search API",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Fuzzy Match & Fréquences",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Google Search API": {
+      "main": [
+        [
+          {
+            "node": "Extraire Snippets",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extraire Snippets": {
+      "main": [
+        [
+          {
+            "node": "Gemini - Générer Réponses",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gemini - Générer Réponses": {
+      "main": [
+        [
+          {
+            "node": "OpenAI - Extraire Entités",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenAI - Extraire Entités": {
+      "main": [
+        [
+          {
+            "node": "Parser Entités",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parser Entités": {
+      "main": [
+        [
+          {
+            "node": "Traitement par Lots",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fuzzy Match & Fréquences": {
+      "main": [
+        [
+          {
+            "node": "Écrire dans Google Sheets",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Préparer Résumé Email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Préparer Résumé Email": {
+      "main": [
+        [
+          {
+            "node": "Gmail - Notification",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "errorWorkflow": ""
+  },
+  "staticData": null,
+  "tags": [
+    {
+      "name": "SEO",
+      "id": "1"
+    },
+    {
+      "name": "Keyword Research",
+      "id": "2"
+    }
+  ],
+  "meta": {
+    "instanceId": "keyword-automatisation"
+  }
+}

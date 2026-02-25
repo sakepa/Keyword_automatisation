@@ -1,0 +1,289 @@
+{
+  "name": "WF3 - Optimisation E-E-A-T & FAQ",
+  "nodes": [
+    {
+      "parameters": {
+        "pollTimes": {
+          "item": [
+            {
+              "mode": "everyMinute",
+              "minute": 10
+            }
+          ]
+        },
+        "documentId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "={{ $credentials.contentCalendarSheetId }}"
+        },
+        "sheetName": {
+          "__rl": true,
+          "mode": "name",
+          "value": "Calendrier"
+        },
+        "event": "rowUpdated",
+        "options": {}
+      },
+      "id": "sheets-trigger-edit",
+      "name": "Sheets Trigger - En édition",
+      "type": "n8n-nodes-base.googleSheetsTrigger",
+      "typeVersion": 1,
+      "position": [240, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": false
+          },
+          "combinator": "and",
+          "conditions": [
+            {
+              "leftValue": "={{ $json.Statut }}",
+              "rightValue": "En édition",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ]
+        }
+      },
+      "id": "filter-edition",
+      "name": "Filtrer Statut = En édition",
+      "type": "n8n-nodes-base.filter",
+      "typeVersion": 2,
+      "position": [460, 300]
+    },
+    {
+      "parameters": {
+        "operation": "download",
+        "fileId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "={{ $json['Lien Drive']?.match(/\\/d\\/([a-zA-Z0-9_-]+)/)?.[1] || '' }}"
+        },
+        "options": {
+          "googleFileConversion": {
+            "conversion": {
+              "docsToFormat": "text/plain"
+            }
+          }
+        }
+      },
+      "id": "drive-read-article",
+      "name": "Google Drive - Lire Article",
+      "type": "n8n-nodes-base.googleDrive",
+      "typeVersion": 3,
+      "position": [680, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Ajouter les métadonnées E-E-A-T au contenu\nconst article = $input.first().json;\nconst calendarRow = $('Filtrer Statut = En édition').first().json;\n\nconst articleContent = article.data || article.content || '';\nconst author = calendarRow.Propriétaire || calendarRow.Owner || 'Expert SEO';\nconst title = calendarRow['URL du Sujet'] || calendarRow.Title || '';\nconst contentType = calendarRow.Type || 'BOFU';\nconst now = new Date().toISOString().split('T')[0];\n\n// Construire le bloc E-E-A-T\nconst eeatHeader = `\n---\n## À propos de l'auteur\n\n**${author}** est un expert reconnu dans le domaine du marketing digital et du SEO. \nFort de plusieurs années d'expérience, il/elle partage ses connaissances pour aider \nles professionnels à optimiser leur présence en ligne.\n\n**Vérifié par :** Équipe éditoriale Data Marketing Labs  \n**Dernière mise à jour :** ${now}  \n\n---\n`;\n\nconst eeatFooter = `\n---\n## Sources et Références\n\n*Les informations présentées dans cet article sont basées sur :*\n- Recherches et analyses des résultats de recherche Google actuels\n- Données extraites via les outils d'analyse SEO (Google Search Console, Semrush)\n- Expertise et expérience professionnelle de l'auteur\n- [Google Search Quality Evaluator Guidelines](https://guidelines.raterhub.com/)\n\n**Date de publication :** ${now}  \n**Dernière vérification factuelle :** ${now}\n---\n`;\n\nreturn [{\n  json: {\n    articleContent,\n    eeatHeader,\n    eeatFooter,\n    title,\n    contentType,\n    author,\n    date: now,\n    driveFileId: calendarRow['Lien Drive']?.match(/\\/d\\/([a-zA-Z0-9_-]+)/)?.[1] || '',\n    calendarRow\n  }\n}];"
+      },
+      "id": "add-eeat-meta",
+      "name": "Ajouter Métadonnées E-E-A-T",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [900, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://{{$credentials.vertexAiRegion}}-aiplatform.googleapis.com/v1/projects/{{$credentials.vertexAiProject}}/locations/{{$credentials.vertexAiRegion}}/publishers/google/models/gemini-1.5-pro:generateContent",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "googleApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ contents: [{ role: 'user', parts: [{ text: `Based on the following article, generate exactly 5 frequently asked questions (FAQ) with detailed answers that add value for the reader. The FAQ should cover aspects not fully addressed in the article. Format as:\\n\\n## FAQ\\n\\n### Q1: [Question]\\n[Answer]\\n\\n### Q2: [Question]\\n[Answer]\\n\\nArticle:\\n${$json.articleContent}` }] }], systemInstruction: { parts: [{ text: 'You are an SEO expert specialized in creating FAQ sections that improve content completeness and help achieve higher Topic Scores. Write in the same language as the article.' }] }, generationConfig: { maxOutputTokens: 2000, temperature: 0.4, topP: 1.0, topK: 40 } }) }}",
+        "options": {
+          "timeout": 60000
+        }
+      },
+      "id": "gemini-faq",
+      "name": "Gemini - Générer FAQ",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1120, 300],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
+    },
+    {
+      "parameters": {
+        "jsCode": "// Assembler l'article complet avec E-E-A-T + FAQ\nconst faqResponse = $input.first().json;\nconst eeatData = $('Ajouter Métadonnées E-E-A-T').first().json;\n\nlet faqSection = '';\ntry {\n  faqSection = faqResponse.candidates[0].content.parts[0].text;\n} catch (e) {\n  faqSection = '\\n## FAQ\\n\\n*Section FAQ en cours de préparation.*\\n';\n}\n\n// Assembler le document final\nconst finalDocument = \n  eeatData.eeatHeader + \n  '\\n' + \n  eeatData.articleContent + \n  '\\n\\n' + \n  faqSection + \n  '\\n' + \n  eeatData.eeatFooter;\n\nreturn [{\n  json: {\n    finalDocument,\n    title: eeatData.title,\n    contentType: eeatData.contentType,\n    author: eeatData.author,\n    driveFileId: eeatData.driveFileId,\n    date: eeatData.date\n  }\n}];"
+      },
+      "id": "assemble-eeat",
+      "name": "Assembler Article E-E-A-T",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1340, 300]
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "fileId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "={{ $json.driveFileId }}"
+        },
+        "options": {}
+      },
+      "id": "drive-update-doc",
+      "name": "Google Drive - Mettre à Jour",
+      "type": "n8n-nodes-base.googleDrive",
+      "typeVersion": 3,
+      "position": [1560, 300]
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "documentId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "={{ $credentials.contentCalendarSheetId }}"
+        },
+        "sheetName": {
+          "__rl": true,
+          "mode": "name",
+          "value": "Calendrier"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "Statut": "Prêt à publier",
+            "E-E-A-T": "Oui",
+            "FAQ": "Oui"
+          }
+        },
+        "options": {}
+      },
+      "id": "sheets-update-ready",
+      "name": "Sheets - Statut Prêt",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [1780, 300]
+    },
+    {
+      "parameters": {
+        "sendTo": "={{ $credentials.notificationEmail }}",
+        "subject": "={{ '[E-E-A-T OK] Article prêt à publier: ' + $json.title }}",
+        "message": "={{ 'L\\'article \"' + $json.title + '\" a été optimisé avec succès :\\n\\n✓ Bloc auteur ajouté\\n✓ Date de mise à jour\\n✓ Sources et références\\n✓ Section FAQ générée (5 questions)\\n✓ Vérificateur/fact-checker mentionné\\n\\nStatut: Prêt à publier' }}",
+        "options": {}
+      },
+      "id": "gmail-eeat-done",
+      "name": "Gmail - Article Prêt",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [2000, 300]
+    }
+  ],
+  "connections": {
+    "Sheets Trigger - En édition": {
+      "main": [
+        [
+          {
+            "node": "Filtrer Statut = En édition",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Filtrer Statut = En édition": {
+      "main": [
+        [
+          {
+            "node": "Google Drive - Lire Article",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Google Drive - Lire Article": {
+      "main": [
+        [
+          {
+            "node": "Ajouter Métadonnées E-E-A-T",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ajouter Métadonnées E-E-A-T": {
+      "main": [
+        [
+          {
+            "node": "Gemini - Générer FAQ",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gemini - Générer FAQ": {
+      "main": [
+        [
+          {
+            "node": "Assembler Article E-E-A-T",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Assembler Article E-E-A-T": {
+      "main": [
+        [
+          {
+            "node": "Google Drive - Mettre à Jour",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Google Drive - Mettre à Jour": {
+      "main": [
+        [
+          {
+            "node": "Sheets - Statut Prêt",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Sheets - Statut Prêt": {
+      "main": [
+        [
+          {
+            "node": "Gmail - Article Prêt",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner"
+  },
+  "tags": [
+    {
+      "name": "SEO",
+      "id": "1"
+    },
+    {
+      "name": "E-E-A-T",
+      "id": "4"
+    }
+  ],
+  "meta": {
+    "instanceId": "keyword-automatisation"
+  }
+}

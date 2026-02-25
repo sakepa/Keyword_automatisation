@@ -1,0 +1,405 @@
+{
+  "name": "WF2 - Génération de Contenu (Pipeline 4 Étapes)",
+  "nodes": [
+    {
+      "parameters": {
+        "pollTimes": {
+          "item": [
+            {
+              "mode": "everyMinute",
+              "minute": 5
+            }
+          ]
+        },
+        "documentId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "={{ $credentials.contentCalendarSheetId }}"
+        },
+        "sheetName": {
+          "__rl": true,
+          "mode": "name",
+          "value": "Calendrier"
+        },
+        "event": "rowAdded",
+        "options": {}
+      },
+      "id": "sheets-trigger",
+      "name": "Google Sheets Trigger",
+      "type": "n8n-nodes-base.googleSheetsTrigger",
+      "typeVersion": 1,
+      "position": [240, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": false
+          },
+          "combinator": "and",
+          "conditions": [
+            {
+              "leftValue": "={{ $json.Statut }}",
+              "rightValue": "En production",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ]
+        }
+      },
+      "id": "filter-status",
+      "name": "Filtrer Statut = En production",
+      "type": "n8n-nodes-base.filter",
+      "typeVersion": 2,
+      "position": [460, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Préparer le brief de contenu à partir du calendrier\nconst row = $input.first().json;\n\n// Déterminer le type de contenu et le template approprié\nconst contentType = row.Type || 'BOFU';\nlet type = 'Guide/Review';\nlet systemPrompt = '';\n\nif (contentType === 'BOFU') {\n  type = 'Guide/Review comparatif';\n  systemPrompt = 'Your name is Miss Galadriel. You are a creative researcher and writer. You write very intriguing blog posts in FIRST PERSON about a given topic. Focus on actionable recommendations and comparisons.';\n} else if (contentType === 'TOFU') {\n  type = 'Guide pratique / How-to';\n  systemPrompt = 'Your name is Miss Galadriel. You are a creative researcher and writer. You write educational and informative blog posts that help beginners understand complex topics.';\n} else {\n  type = 'Article de référence / Données';\n  systemPrompt = 'Your name is Miss Galadriel. You are a creative researcher and writer. You create comprehensive reference articles with statistics and data that other websites want to link to.';\n}\n\nconst title = row['URL du Sujet'] || row.Title || row.Titre || '';\nconst keywords = row.Keywords || row['Mots-clés'] || '';\nconst goal = row.Goal || row.Objectif || `Providing comprehensive information about ${title}`;\nconst context = row.Context || row.Contexte || `Research and expertise on ${title}`;\n\nconst userPrompt = `Write a 800 word in-depth LONG detailed ${type}.\nUse H1, H2 u li headlines.\nThe title is ${title}.\nShare your experience and explain ${goal} in a step-by-step format.\nUse keywords: ${keywords}.\nUse the ${context} to get your information.`;\n\nreturn [{\n  json: {\n    rowIndex: row.row_number || 0,\n    type,\n    title,\n    goal,\n    keywords,\n    context,\n    contentType,\n    systemPrompt,\n    userPrompt,\n    owner: row.Propriétaire || row.Owner || '',\n    originalRow: row\n  }\n}];"
+      },
+      "id": "prepare-brief",
+      "name": "Préparer le Brief",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [680, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://{{$credentials.vertexAiRegion}}-aiplatform.googleapis.com/v1/projects/{{$credentials.vertexAiProject}}/locations/{{$credentials.vertexAiRegion}}/publishers/google/models/gemini-1.5-pro:generateContent",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "googleApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ contents: [{ role: 'user', parts: [{ text: $json.userPrompt }] }], systemInstruction: { parts: [{ text: $json.systemPrompt }] }, generationConfig: { maxOutputTokens: 2000, temperature: 0.5, topP: 1.0, topK: 40 } }) }}",
+        "options": {
+          "timeout": 60000
+        }
+      },
+      "id": "gemini-draft",
+      "name": "Étape 1 - Brouillon Initial",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [900, 300],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
+    },
+    {
+      "parameters": {
+        "jsCode": "// Extraire le texte généré\nconst response = $input.first().json;\nlet generatedText = '';\ntry {\n  generatedText = response.candidates[0].content.parts[0].text;\n} catch (e) {\n  throw new Error('Erreur extraction texte Gemini: ' + JSON.stringify(response));\n}\n\nconst brief = $('Préparer le Brief').first().json;\n\nreturn [{\n  json: {\n    ...brief,\n    generatedText,\n    step: 'draft_complete'\n  }\n}];"
+      },
+      "id": "extract-draft",
+      "name": "Extraire Brouillon",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1120, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://{{$credentials.vertexAiRegion}}-aiplatform.googleapis.com/v1/projects/{{$credentials.vertexAiProject}}/locations/{{$credentials.vertexAiRegion}}/publishers/google/models/gemini-1.5-pro:generateContent",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "googleApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ contents: [{ role: 'user', parts: [{ text: 'To the best of your knowledge, is the following article factually accurate on all accounts? If not, please list the inaccuracies and provide the correct facts instead.\\n\\nHere is the article:\\n\\n' + $json.generatedText }] }], systemInstruction: { parts: [{ text: $json.systemPrompt }] }, generationConfig: { maxOutputTokens: 2000, temperature: 0.3, topP: 1.0, topK: 40 } }) }}",
+        "options": {
+          "timeout": 60000
+        }
+      },
+      "id": "gemini-fact-check",
+      "name": "Étape 2 - Vérification Factuelle",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1340, 300],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://{{$credentials.vertexAiRegion}}-aiplatform.googleapis.com/v1/projects/{{$credentials.vertexAiProject}}/locations/{{$credentials.vertexAiRegion}}/publishers/google/models/gemini-1.5-pro:generateContent",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "googleApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ contents: [{ role: 'user', parts: [{ text: 'Are there any sentences or paragraphs in the following article that simply summarize what was said earlier in the article:\\n\\n' + $json.generatedText }] }], systemInstruction: { parts: [{ text: $json.systemPrompt }] }, generationConfig: { maxOutputTokens: 2000, temperature: 0.3, topP: 1.0, topK: 40 } }) }}",
+        "options": {
+          "timeout": 60000
+        }
+      },
+      "id": "gemini-redundancy",
+      "name": "Étape 3 - Détection Redondances",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1560, 300],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://{{$credentials.vertexAiRegion}}-aiplatform.googleapis.com/v1/projects/{{$credentials.vertexAiProject}}/locations/{{$credentials.vertexAiRegion}}/publishers/google/models/gemini-1.5-pro:generateContent",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "googleApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ contents: [{ role: 'user', parts: [{ text: 'Is there any unnecessary fluff in the following article:\\n\\n' + $json.generatedText }] }], systemInstruction: { parts: [{ text: $json.systemPrompt }] }, generationConfig: { maxOutputTokens: 2000, temperature: 0.3, topP: 1.0, topK: 40 } }) }}",
+        "options": {
+          "timeout": 60000
+        }
+      },
+      "id": "gemini-fluff",
+      "name": "Étape 4 - Suppression Fluff",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1780, 300],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://{{$credentials.vertexAiRegion}}-aiplatform.googleapis.com/v1/projects/{{$credentials.vertexAiProject}}/locations/{{$credentials.vertexAiRegion}}/publishers/google/models/gemini-1.5-pro:generateContent",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "googleApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ contents: [{ role: 'user', parts: [{ text: 'Please break up the paragraphs in the following article. No paragraph should have more than ten sentences. Ideally, each paragraph should be just one or max 5 sentences in length. Keep all headings.:\\n\\n' + $json.generatedText }] }], systemInstruction: { parts: [{ text: $json.systemPrompt }] }, generationConfig: { maxOutputTokens: 2000, temperature: 0.3, topP: 1.0, topK: 40 } }) }}",
+        "options": {
+          "timeout": 60000
+        }
+      },
+      "id": "gemini-structure",
+      "name": "Étape 5 - Restructuration",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2000, 300],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
+    },
+    {
+      "parameters": {
+        "jsCode": "// Assembler le contenu final après les 5 étapes\nconst structureResponse = $input.first().json;\nconst brief = $('Préparer le Brief').first().json;\n\nlet finalText = '';\ntry {\n  finalText = structureResponse.candidates[0].content.parts[0].text;\n} catch (e) {\n  // Fallback sur le brouillon original\n  finalText = brief.generatedText;\n}\n\n// Construire le document final\nconst now = new Date().toISOString().split('T')[0];\nconst document = `# ${brief.title}\\n\\n` +\n  `**Type:** ${brief.contentType}\\n` +\n  `**Mots-clés:** ${brief.keywords}\\n` +\n  `**Date de génération:** ${now}\\n` +\n  `**Propriétaire:** ${brief.owner}\\n\\n` +\n  `---\\n\\n` +\n  finalText;\n\nreturn [{\n  json: {\n    title: brief.title,\n    contentType: brief.contentType,\n    owner: brief.owner,\n    document,\n    finalText,\n    rowIndex: brief.rowIndex,\n    generatedDate: now\n  }\n}];"
+      },
+      "id": "assemble-final",
+      "name": "Assembler Contenu Final",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2220, 300]
+    },
+    {
+      "parameters": {
+        "operation": "upload",
+        "name": "={{ 'Article - ' + $json.title + ' - ' + $json.generatedDate }}",
+        "folderId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "={{ $credentials.contentDriveFolderId }}"
+        },
+        "options": {
+          "mimeType": "application/vnd.google-apps.document"
+        }
+      },
+      "id": "drive-create-doc",
+      "name": "Google Drive - Créer Document",
+      "type": "n8n-nodes-base.googleDrive",
+      "typeVersion": 3,
+      "position": [2440, 200]
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "documentId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "={{ $credentials.contentCalendarSheetId }}"
+        },
+        "sheetName": {
+          "__rl": true,
+          "mode": "name",
+          "value": "Calendrier"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "Statut": "Brouillon prêt",
+            "Lien Drive": "={{ $('Google Drive - Créer Document').first().json.webViewLink }}"
+          }
+        },
+        "options": {}
+      },
+      "id": "sheets-update-status",
+      "name": "Mettre à jour Statut Sheets",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [2440, 400]
+    },
+    {
+      "parameters": {
+        "sendTo": "={{ $json.owner }}",
+        "subject": "={{ '[Contenu Prêt] ' + $json.title }}",
+        "message": "={{ 'Bonjour,\\n\\nLe brouillon pour l\\'article \"' + $json.title + '\" (' + $json.contentType + ') est prêt.\\n\\nVous pouvez le consulter et l\\'éditer ici : ' + $('Google Drive - Créer Document').first().json.webViewLink + '\\n\\nBonne rédaction !' }}",
+        "options": {}
+      },
+      "id": "gmail-notify-writer",
+      "name": "Gmail - Notifier Rédacteur",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [2660, 300]
+    }
+  ],
+  "connections": {
+    "Google Sheets Trigger": {
+      "main": [
+        [
+          {
+            "node": "Filtrer Statut = En production",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Filtrer Statut = En production": {
+      "main": [
+        [
+          {
+            "node": "Préparer le Brief",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Préparer le Brief": {
+      "main": [
+        [
+          {
+            "node": "Étape 1 - Brouillon Initial",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Étape 1 - Brouillon Initial": {
+      "main": [
+        [
+          {
+            "node": "Extraire Brouillon",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extraire Brouillon": {
+      "main": [
+        [
+          {
+            "node": "Étape 2 - Vérification Factuelle",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Étape 2 - Vérification Factuelle": {
+      "main": [
+        [
+          {
+            "node": "Étape 3 - Détection Redondances",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Étape 3 - Détection Redondances": {
+      "main": [
+        [
+          {
+            "node": "Étape 4 - Suppression Fluff",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Étape 4 - Suppression Fluff": {
+      "main": [
+        [
+          {
+            "node": "Étape 5 - Restructuration",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Étape 5 - Restructuration": {
+      "main": [
+        [
+          {
+            "node": "Assembler Contenu Final",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Assembler Contenu Final": {
+      "main": [
+        [
+          {
+            "node": "Google Drive - Créer Document",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Mettre à jour Statut Sheets",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Google Drive - Créer Document": {
+      "main": [
+        [
+          {
+            "node": "Gmail - Notifier Rédacteur",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner"
+  },
+  "tags": [
+    {
+      "name": "SEO",
+      "id": "1"
+    },
+    {
+      "name": "Content Generation",
+      "id": "3"
+    }
+  ],
+  "meta": {
+    "instanceId": "keyword-automatisation"
+  }
+}

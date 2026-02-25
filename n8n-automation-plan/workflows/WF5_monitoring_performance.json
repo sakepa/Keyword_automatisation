@@ -1,0 +1,275 @@
+{
+  "name": "WF5 - Monitoring Performance & Alertes (Weekly)",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 9 * * 1"
+            }
+          ]
+        }
+      },
+      "id": "cron-weekly",
+      "name": "Cron - Lundi 09h00",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [240, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://searchconsole.googleapis.com/webmasters/v3/sites/{{ encodeURIComponent($credentials.siteUrl) }}/searchAnalytics/query",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "googleApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ startDate: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0], endDate: new Date().toISOString().split('T')[0], dimensions: ['page', 'query'], rowLimit: 1000, dataState: 'all' }) }}",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "gsc-query",
+      "name": "Google Search Console - Données 7j",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [460, 200],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
+    },
+    {
+      "parameters": {
+        "operation": "read",
+        "documentId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "={{ $credentials.contentCalendarSheetId }}"
+        },
+        "sheetName": {
+          "__rl": true,
+          "mode": "name",
+          "value": "Calendrier"
+        },
+        "options": {
+          "filter": {
+            "column": "Statut",
+            "value": "Publié"
+          }
+        }
+      },
+      "id": "sheets-read-published",
+      "name": "Lire Articles Publiés",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [460, 400]
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "mergeByFields": {
+          "values": [
+            {
+              "field1": "keys",
+              "field2": "URL du Sujet"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "merge-data",
+      "name": "Croiser GSC + Calendrier",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3,
+      "position": [680, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Analyser les performances et générer le rapport hebdomadaire\nconst gscData = $('Google Search Console - Données 7j').first().json;\nconst publishedArticles = $('Lire Articles Publiés').all();\n\nconst gscRows = gscData.rows || [];\nconst today = new Date();\nconst sevenDaysAgo = new Date(today - 7 * 24 * 60 * 60 * 1000);\n\n// Agréger les données GSC par page\nconst pageMetrics = new Map();\nfor (const row of gscRows) {\n  const page = row.keys?.[0] || '';\n  const query = row.keys?.[1] || '';\n  \n  if (!pageMetrics.has(page)) {\n    pageMetrics.set(page, {\n      clicks: 0,\n      impressions: 0,\n      ctr: 0,\n      position: 0,\n      positionCount: 0,\n      topQueries: []\n    });\n  }\n  \n  const metrics = pageMetrics.get(page);\n  metrics.clicks += row.clicks || 0;\n  metrics.impressions += row.impressions || 0;\n  metrics.position += row.position || 0;\n  metrics.positionCount += 1;\n  metrics.topQueries.push({ query, clicks: row.clicks || 0, position: row.position || 0 });\n}\n\n// Calculer les moyennes\nfor (const [page, metrics] of pageMetrics) {\n  metrics.ctr = metrics.impressions > 0 ? (metrics.clicks / metrics.impressions * 100).toFixed(2) : 0;\n  metrics.position = metrics.positionCount > 0 ? (metrics.position / metrics.positionCount).toFixed(1) : 0;\n  metrics.topQueries.sort((a, b) => b.clicks - a.clicks);\n  metrics.topQueries = metrics.topQueries.slice(0, 5);\n}\n\n// Identifier les articles non-indexés (publiés mais sans données GSC)\nconst notIndexed = [];\nconst performanceData = [];\n\nfor (const article of publishedArticles) {\n  const url = article.json['URL du Sujet'] || '';\n  const pubDate = article.json['Date de Publication'] ? new Date(article.json['Date de Publication']) : null;\n  \n  // Chercher dans les données GSC\n  let found = false;\n  for (const [page, metrics] of pageMetrics) {\n    if (page.includes(url) || url.includes(page)) {\n      found = true;\n      performanceData.push({\n        url,\n        type: article.json.Type || '',\n        pubDate: article.json['Date de Publication'] || '',\n        clicks: metrics.clicks,\n        impressions: metrics.impressions,\n        ctr: metrics.ctr,\n        avgPosition: metrics.position,\n        topQueries: metrics.topQueries\n      });\n      break;\n    }\n  }\n  \n  if (!found && pubDate) {\n    const daysSincePublish = Math.floor((today - pubDate) / (1000 * 60 * 60 * 24));\n    notIndexed.push({\n      url,\n      type: article.json.Type || '',\n      pubDate: article.json['Date de Publication'] || '',\n      daysSincePublish\n    });\n  }\n}\n\n// Trier par performance\nperformanceData.sort((a, b) => b.clicks - a.clicks);\n\n// Générer le rapport\nlet report = `# Rapport Hebdomadaire de Performance SEO\\n`;\nreport += `**Période:** ${sevenDaysAgo.toISOString().split('T')[0]} → ${today.toISOString().split('T')[0]}\\n\\n`;\n\n// Totaux\nlet totalClicks = 0, totalImpressions = 0;\nfor (const p of performanceData) {\n  totalClicks += p.clicks;\n  totalImpressions += p.impressions;\n}\n\nreport += `## Résumé Global\\n\\n`;\nreport += `| Métrique | Valeur |\\n|----------|--------|\\n`;\nreport += `| Clics totaux (7j) | ${totalClicks} |\\n`;\nreport += `| Impressions totales (7j) | ${totalImpressions} |\\n`;\nreport += `| CTR moyen | ${totalImpressions > 0 ? (totalClicks/totalImpressions*100).toFixed(2) : 0}% |\\n`;\nreport += `| Articles indexés | ${performanceData.length} |\\n`;\nreport += `| Articles non-indexés | ${notIndexed.length} |\\n\\n`;\n\n// Top performers\nif (performanceData.length > 0) {\n  report += `## Top 10 Articles par Clics\\n\\n`;\n  report += `| URL | Type | Clics | Impressions | CTR | Position |\\n`;\n  report += `|-----|------|-------|-------------|-----|----------|\\n`;\n  for (const p of performanceData.slice(0, 10)) {\n    report += `| ${p.url} | ${p.type} | ${p.clicks} | ${p.impressions} | ${p.ctr}% | ${p.avgPosition} |\\n`;\n  }\n  report += '\\n';\n}\n\n// Non-indexés\nif (notIndexed.length > 0) {\n  report += `## Articles Non-Indexés\\n\\n`;\n  for (const ni of notIndexed) {\n    const urgency = ni.daysSincePublish > 7 ? '🔴' : '🟡';\n    report += `- ${urgency} **${ni.url}** (${ni.type}) - Publié il y a ${ni.daysSincePublish} jours\\n`;\n  }\n  report += '\\n';\n}\n\nreturn [{\n  json: {\n    report,\n    htmlReport: report.replace(/\\n/g, '<br>'),\n    hasNotIndexed: notIndexed.filter(n => n.daysSincePublish > 7).length > 0,\n    notIndexedCount: notIndexed.length,\n    totalClicks,\n    totalImpressions,\n    performanceData,\n    notIndexed\n  }\n}];"
+      },
+      "id": "analyze-performance",
+      "name": "Analyser Performance",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [900, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.hasNotIndexed }}",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "id": "check-not-indexed",
+      "name": "Articles Non-Indexés > 7j ?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1120, 300]
+    },
+    {
+      "parameters": {
+        "sendTo": "={{ $credentials.notificationEmail }}",
+        "subject": "={{ '[ALERTE SEO] ' + $json.notIndexedCount + ' articles non-indexés après 7+ jours' }}",
+        "message": "={{ 'ATTENTION: Certains articles publiés ne sont toujours pas indexés par Google après plus de 7 jours.\\n\\nActions recommandées :\\n1. Vérifier l\\'indexation dans Google Search Console\\n2. Soumettre manuellement les URLs pour indexation\\n3. Vérifier qu\\'il n\\'y a pas de problème technique (noindex, robots.txt)\\n4. Ajouter des liens internes vers ces articles\\n\\nDétails dans le rapport hebdomadaire.' }}",
+        "options": {}
+      },
+      "id": "gmail-alert-not-indexed",
+      "name": "Gmail - Alerte Non-Indexés",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [1340, 200]
+    },
+    {
+      "parameters": {
+        "sendTo": "={{ $credentials.notificationEmail }}",
+        "subject": "={{ '[SEO Weekly] Rapport de performance - ' + new Date().toISOString().split('T')[0] }}",
+        "message": "={{ $json.htmlReport }}",
+        "options": {}
+      },
+      "id": "gmail-weekly-report",
+      "name": "Gmail - Rapport Hebdomadaire",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [1340, 400]
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "={{ $credentials.contentCalendarSheetId }}"
+        },
+        "sheetName": {
+          "__rl": true,
+          "mode": "name",
+          "value": "Performance"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "Date": "={{ new Date().toISOString().split('T')[0] }}",
+            "Total Clics": "={{ $json.totalClicks }}",
+            "Total Impressions": "={{ $json.totalImpressions }}",
+            "Articles Indexés": "={{ $json.performanceData.length }}",
+            "Articles Non-Indexés": "={{ $json.notIndexedCount }}"
+          }
+        },
+        "options": {}
+      },
+      "id": "sheets-log-performance",
+      "name": "Logger Performance dans Sheets",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [1560, 300]
+    }
+  ],
+  "connections": {
+    "Cron - Lundi 09h00": {
+      "main": [
+        [
+          {
+            "node": "Google Search Console - Données 7j",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Lire Articles Publiés",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Google Search Console - Données 7j": {
+      "main": [
+        [
+          {
+            "node": "Croiser GSC + Calendrier",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Lire Articles Publiés": {
+      "main": [
+        [
+          {
+            "node": "Croiser GSC + Calendrier",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Croiser GSC + Calendrier": {
+      "main": [
+        [
+          {
+            "node": "Analyser Performance",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Analyser Performance": {
+      "main": [
+        [
+          {
+            "node": "Articles Non-Indexés > 7j ?",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Gmail - Rapport Hebdomadaire",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Logger Performance dans Sheets",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Articles Non-Indexés > 7j ?": {
+      "main": [
+        [
+          {
+            "node": "Gmail - Alerte Non-Indexés",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner"
+  },
+  "tags": [
+    {
+      "name": "SEO",
+      "id": "1"
+    },
+    {
+      "name": "Monitoring",
+      "id": "6"
+    }
+  ],
+  "meta": {
+    "instanceId": "keyword-automatisation"
+  }
+}
